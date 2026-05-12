@@ -1,17 +1,76 @@
+import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Terminal, ChevronRight, Lock, Network, Globe, Key, Repeat, Zap } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { getCategories, getAttacksByCategory, getAllAttacks } from '../../data/attacksData'
 import { useTheme } from '../../context/ThemeContext'
 
-const TERMINAL_LINES = [
-  { type: 'cmd',    text: '$ mag http-dos --target-url http://192.168.56.10 --num-connections 50 --duration 60' },
-  { type: 'info',   text: '[*] Initialized HTTP DoS attack simulation' },
-  { type: 'info',   text: '[*] Target: http://192.168.56.10  method: GET  connections: 50' },
-  { type: 'ok',     text: '[+] Progress: 25.0%  active connections: 50  requests: 187' },
-  { type: 'ok',     text: '[+] Progress: 50.0%  active connections: 50  requests: 374' },
-  { type: 'ok',     text: '[+] Progress: 100.0%  active connections: 50  requests: 748' },
-  { type: 'result', text: '[=] HTTP DoS complete: 748 requests · server response time +3400ms' },
+// Each session = one command + its streamed output. The terminal cycles through these forever.
+const SESSIONS = [
+  {
+    cmd: 'mag http-dos --target-url http://192.168.56.10 --num-connections 50 --duration 60',
+    lines: [
+      { type: 'info',   text: '[*] Initialized HTTP DoS attack simulation', delay: 250 },
+      { type: 'info',   text: '[*] Target: http://192.168.56.10  method: GET  connections: 50', delay: 280 },
+      { type: 'ok',     text: '[+] Progress:  25.0%  active connections: 50  requests: 187', delay: 600 },
+      { type: 'ok',     text: '[+] Progress:  50.0%  active connections: 50  requests: 374', delay: 600 },
+      { type: 'ok',     text: '[+] Progress:  75.0%  active connections: 50  requests: 561', delay: 600 },
+      { type: 'ok',     text: '[+] Progress: 100.0%  active connections: 50  requests: 748', delay: 600 },
+      { type: 'result', text: '[=] HTTP DoS complete: 748 requests · server response time +3400ms', delay: 400 },
+    ],
+  },
+  {
+    cmd: 'mag syn-flood --target 192.168.56.10 --port 80 --packets 10000 --rate 1000',
+    lines: [
+      { type: 'info',   text: '[*] Opening raw socket on eth0', delay: 220 },
+      { type: 'info',   text: '[*] Spoofing source addresses · rate-limit: 1000 pps', delay: 280 },
+      { type: 'ok',     text: '[+] Sent  2500 / 10000 SYN packets  ·  dropped: 0', delay: 550 },
+      { type: 'ok',     text: '[+] Sent  5000 / 10000 SYN packets  ·  dropped: 0', delay: 550 },
+      { type: 'ok',     text: '[+] Sent  7500 / 10000 SYN packets  ·  dropped: 2', delay: 550 },
+      { type: 'ok',     text: '[+] Sent 10000 / 10000 SYN packets  ·  dropped: 2', delay: 550 },
+      { type: 'result', text: '[=] SYN flood complete: 9998 packets accepted by target', delay: 400 },
+    ],
+  },
+  {
+    cmd: 'mag arp-spoof --interface eth0 --victim 192.168.56.20 --gateway 192.168.56.1',
+    lines: [
+      { type: 'info',   text: '[*] Enabling IPv4 forwarding', delay: 200 },
+      { type: 'info',   text: '[*] Poisoning ARP caches every 2s', delay: 280 },
+      { type: 'ok',     text: '[+] 192.168.56.20 is-at  aa:bb:cc:dd:ee:ff   (impersonating gateway)', delay: 700 },
+      { type: 'ok',     text: '[+] 192.168.56.1  is-at  aa:bb:cc:dd:ee:ff   (impersonating victim)', delay: 700 },
+      { type: 'ok',     text: '[+] Captured 14 packets on victim → gateway path', delay: 800 },
+      { type: 'result', text: '[=] MITM established · forwarding traffic through attacker', delay: 400 },
+    ],
+  },
+  {
+    cmd: 'mag dns-amplification --resolver 192.168.56.5 --victim 192.168.56.20 --duration 30',
+    lines: [
+      { type: 'info',   text: '[*] Sending spoofed ANY queries to open resolver', delay: 240 },
+      { type: 'info',   text: '[*] Source IP forged → victim 192.168.56.20', delay: 300 },
+      { type: 'ok',     text: '[+] Query size:  64 B  ·  response size: 3812 B  ·  amplification: 59.6×', delay: 700 },
+      { type: 'ok',     text: '[+] Queries sent: 1200  ·  reflected bytes: ~4.5 MB → victim', delay: 700 },
+      { type: 'result', text: '[=] Amplification run complete · effective gain 59.6×', delay: 400 },
+    ],
+  },
+  {
+    cmd: 'mag ssh-brute --target 192.168.56.10 --user admin --wordlist rockyou.txt',
+    lines: [
+      { type: 'info',   text: '[*] Loaded 14344391 candidates from rockyou.txt', delay: 260 },
+      { type: 'info',   text: '[*] Concurrency: 16 · timeout: 5s', delay: 280 },
+      { type: 'ok',     text: "[+] Tried admin:123456            → denied", delay: 450 },
+      { type: 'ok',     text: "[+] Tried admin:password          → denied", delay: 450 },
+      { type: 'ok',     text: "[+] Tried admin:qwerty            → denied", delay: 450 },
+      { type: 'ok',     text: "[+] Tried admin:letmein           → denied", delay: 450 },
+      { type: 'result', text: '[!] No credentials recovered in 4 attempts · continuing in background', delay: 400 },
+    ],
+  },
 ]
+
+// Typing speed for the command line (ms/char). A small jitter is added to feel human.
+const TYPE_MS = 28
+// Pause after a session finishes, before clearing and starting the next.
+const SESSION_HOLD_MS = 2200
+// Soft cap on visible lines so the terminal never grows past its panel.
+const MAX_VISIBLE_LINES = 14
 
 const STEPS = [
   { n: '01', label: 'Study the attack', desc: 'Browse techniques, read how each attack works at the protocol level, and simulate it — all in the browser, no install required.' },
@@ -35,11 +94,76 @@ const MagKeyword = () => (
   </code>
 )
 
+// Drives the live terminal: types out the command, streams output lines, then
+// rolls into the next session forever. Pauses while the tab is hidden so the
+// animation isn't running off-screen.
+function useLiveTerminal(sessions) {
+  const [sessionIndex, setSessionIndex] = useState(0)
+  const [typed, setTyped]               = useState('')           // chars of cmd typed so far
+  const [phase, setPhase]               = useState('typing')     // typing | running | done
+  const [visibleLines, setVisibleLines] = useState([])           // already-streamed output lines
+  const timerRef = useRef(null)
+
+  // Stop the animation while the tab is hidden — saves CPU and avoids a huge
+  // burst of catch-up timers when the user comes back.
+  const [active, setActive] = useState(() =>
+    typeof document === 'undefined' ? true : !document.hidden
+  )
+  useEffect(() => {
+    const onVis = () => setActive(!document.hidden)
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
+  useEffect(() => {
+    if (!active) return undefined
+
+    const session = sessions[sessionIndex]
+    const schedule = (fn, ms) => { timerRef.current = setTimeout(fn, ms) }
+
+    if (phase === 'typing') {
+      if (typed.length < session.cmd.length) {
+        const jitter = Math.random() * 18
+        schedule(() => setTyped(session.cmd.slice(0, typed.length + 1)), TYPE_MS + jitter)
+      } else {
+        schedule(() => setPhase('running'), 320)
+      }
+    } else if (phase === 'running') {
+      const next = session.lines[visibleLines.length]
+      if (next) {
+        schedule(
+          () => setVisibleLines(prev => [...prev, next]),
+          next.delay ?? 400
+        )
+      } else {
+        schedule(() => setPhase('done'), SESSION_HOLD_MS)
+      }
+    } else if (phase === 'done') {
+      schedule(() => {
+        setTyped('')
+        setVisibleLines([])
+        setPhase('typing')
+        setSessionIndex(i => (i + 1) % sessions.length)
+      }, 600)
+    }
+
+    return () => clearTimeout(timerRef.current)
+  }, [phase, typed, visibleLines, sessionIndex, sessions, active])
+
+  return { typed, phase, visibleLines, sessionIndex }
+}
+
 function HeroSection() {
   const { isDark } = useTheme()
   const categories = getCategories()
   const allAttacks = getAllAttacks()
   const totalScenarios = allAttacks.reduce((sum, a) => sum + (a.scenarios?.length ?? 0), 0)
+
+  const { typed, phase, visibleLines, sessionIndex } = useLiveTerminal(SESSIONS)
+  const currentSession = SESSIONS[sessionIndex]
+  const cmdDone = phase !== 'typing'
+  // Trim from the top if a session ever streams more lines than the panel can hold.
+  const renderedLines = visibleLines.slice(-MAX_VISIBLE_LINES)
 
   const attackLayers = categories.map(cat => {
     const attacks = getAttacksByCategory(cat)
@@ -137,20 +261,60 @@ function HeroSection() {
               <span className="w-3 h-3 rounded-full bg-red-400" />
               <span className="w-3 h-3 rounded-full bg-yellow-400" />
               <span className="w-3 h-3 rounded-full bg-green-400" />
-              <span className="ml-3 text-xs font-mono" style={{ color: isDark ? '#9ca3af' : '#6b7280' }}>mag http-dos · attacker container</span>
+              <span className="ml-3 text-xs font-mono" style={{ color: isDark ? '#9ca3af' : '#6b7280' }}>
+                {currentSession.cmd.split(' ').slice(0, 2).join(' ')} · attacker container
+              </span>
+              <span
+                className="ml-auto inline-flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider"
+                style={{ color: isDark ? '#6b7280' : '#9ca3af' }}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${phase === 'running' ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`}
+                />
+                {phase === 'running' ? 'live' : phase === 'typing' ? 'input' : 'idle'}
+              </span>
             </div>
-            <div className="p-5 font-mono text-xs leading-relaxed space-y-1.5">
-              {TERMINAL_LINES.map((line, i) => (
-                <div key={i} style={{ color:
-                  line.type === 'cmd'    ? (isDark ? '#111827' : '#f3f4f6') :
-                  line.type === 'ok'    ? (isDark ? '#16a34a' : '#4ade80') :
-                  line.type === 'result'? (isDark ? '#ea580c' : '#fde047') :
-                                          (isDark ? '#6b7280' : '#9ca3af')
-                }} className={line.type === 'cmd' || line.type === 'result' ? 'font-semibold' : ''}>
+            <div
+              className="p-5 font-mono text-xs leading-relaxed space-y-1.5 min-h-[340px]"
+              aria-live="polite"
+            >
+              {/* Prompt + typed command */}
+              <div style={{ color: isDark ? '#111827' : '#f3f4f6' }} className="font-semibold break-all">
+                <span style={{ color: isDark ? '#16a34a' : '#4ade80' }}>$</span>{' '}
+                {typed}
+                {!cmdDone && (
+                  <span
+                    className="inline-block w-2 h-3 ml-0.5 align-middle animate-pulse"
+                    style={{ backgroundColor: isDark ? '#111827' : '#f3f4f6' }}
+                  />
+                )}
+              </div>
+
+              {/* Streamed output */}
+              {renderedLines.map((line, i) => (
+                <div
+                  key={`${sessionIndex}-${i}`}
+                  style={{ color:
+                    line.type === 'ok'    ? (isDark ? '#16a34a' : '#4ade80') :
+                    line.type === 'result'? (isDark ? '#ea580c' : '#fde047') :
+                                            (isDark ? '#6b7280' : '#9ca3af')
+                  }}
+                  className={line.type === 'result' ? 'font-semibold' : ''}
+                >
                   {line.text}
                 </div>
               ))}
-              <div style={{ color: isDark ? '#d1d5db' : '#4b5563' }} className="mt-3">█</div>
+
+              {/* Idle cursor on the next line once a session finishes */}
+              {phase === 'done' && (
+                <div style={{ color: isDark ? '#d1d5db' : '#4b5563' }} className="mt-1">
+                  <span style={{ color: isDark ? '#16a34a' : '#4ade80' }}>$</span>{' '}
+                  <span
+                    className="inline-block w-2 h-3 align-middle animate-pulse"
+                    style={{ backgroundColor: isDark ? '#111827' : '#f3f4f6' }}
+                  />
+                </div>
+              )}
             </div>
           </div>
         </div>
